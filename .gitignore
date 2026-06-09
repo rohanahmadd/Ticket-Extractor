@@ -1,0 +1,25 @@
+# Secrets — never commit these
+.env
+
+# Generated outputs
+output/
+outputs/
+processed/
+inbox/
+sweet_creme_extract/
+*.xlsx
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# macOS
+.DS_Store

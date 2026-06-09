@@ -1,0 +1,9 @@
+anthropic
+PyMySQL
+python-dotenv
+Pillow
+APScheduler
+requests
+openai
+openai-whisper
+flask

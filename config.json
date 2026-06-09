@@ -1,0 +1,36 @@
+{
+  "anthropic_api_key": "",
+  "schedule_hours": 12,
+  "default_email": "you@yourcompany.com",
+
+  "delivery": {
+    "method": "teams_dm",
+    "fallback_email": false
+  },
+
+  "groups": [
+    {
+      "name": "Sweet Creme",
+      "email": "manager@sweetcreme.com",
+      "teams_recipient_email": "manager@sweetcreme.com"
+    },
+    {
+      "name": "Gulshan Branch",
+      "email": "gulshan.manager@yourchain.com",
+      "teams_recipient_email": "gulshan.manager@yourchain.com"
+    },
+    {
+      "name": "Lahore Branch",
+      "email": "lahore.manager@yourchain.com",
+      "teams_recipient_email": "lahore.manager@yourchain.com"
+    }
+  ],
+
+  "email": {
+    "host": "smtp.gmail.com",
+    "port": 587,
+    "username": "your_gmail@gmail.com",
+    "password": "your_app_password_here",
+    "from": "your_gmail@gmail.com"
+  }
+}

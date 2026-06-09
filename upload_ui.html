@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Ticket Upload</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 600px;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+
+        .header p {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 40px 30px;
+        }
+
+        .upload-area {
+            border: 2px dashed #667eea;
+            border-radius: 8px;
+            padding: 40px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: #f8f9ff;
+        }
+
+        .upload-area:hover {
+            border-color: #764ba2;
+            background: #f0f2ff;
+        }
+
+        .upload-area.dragover {
+            border-color: #667eea;
+            background: #e8ecff;
+            transform: scale(1.02);
+        }
+
+        .upload-area-icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+        }
+
+        .upload-area p {
+            color: #333;
+            margin-bottom: 4px;
+            font-weight: 500;
+        }
+
+        .upload-area-hint {
+            color: #999;
+            font-size: 12px;
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        .file-name {
+            margin-top: 20px;
+            padding: 12px;
+            background: #f0f2ff;
+            border-radius: 6px;
+            display: none;
+        }
+
+        .file-name.show {
+            display: block;
+        }
+
+        .file-name p {
+            font-size: 13px;
+            color: #667eea;
+            margin: 4px 0;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 4px;
+            background: #e0e0e0;
+            border-radius: 2px;
+            margin-top: 8px;
+            overflow: hidden;
+            display: none;
+        }
+
+        .progress-bar.show {
+            display: block;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        button {
+            flex: 1;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .btn-upload {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-upload:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-upload:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-clear {
+            background: #f0f2ff;
+            color: #667eea;
+        }
+
+        .btn-clear:hover {
+            background: #e8ecff;
+        }
+
+        .results {
+            margin-top: 30px;
+            display: none;
+        }
+
+        .results.show {
+            display: block;
+        }
+
+        .result-card {
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 12px;
+        }
+
+        .result-card.success {
+            background: #f0fdf4;
+            border-left: 4px solid #22c55e;
+        }
+
+        .result-card.error {
+            background: #fef2f2;
+            border-left: 4px solid #ef4444;
+        }
+
+        .result-card.loading {
+            background: #f0f9ff;
+            border-left: 4px solid #0ea5e9;
+        }
+
+        .result-title {
+            font-weight: 600;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .result-card.success .result-title {
+            color: #16a34a;
+        }
+
+        .result-card.error .result-title {
+            color: #dc2626;
+        }
+
+        .result-card.loading .result-title {
+            color: #0284c7;
+        }
+
+        .result-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .result-item {
+            padding: 8px;
+            background: rgba(255, 255, 255, 0.5);
+            border-radius: 4px;
+        }
+
+        .result-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+
+        .result-value {
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        .result-card.success .result-value {
+            color: #16a34a;
+        }
+
+        .result-card.error .result-value {
+            color: #dc2626;
+        }
+
+        .result-card.loading .result-value {
+            color: #0284c7;
+        }
+
+        .result-details {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid rgba(0, 0, 0, 0.1);
+            font-size: 13px;
+        }
+
+        .result-detail-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 6px 0;
+            color: #666;
+        }
+
+        .result-detail-label {
+            font-weight: 500;
+        }
+
+        .result-detail-value {
+            font-family: 'Courier New', monospace;
+            color: #333;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 3px solid rgba(102, 126, 234, 0.3);
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .status-badge.success {
+            background: #22c55e;
+            color: white;
+        }
+
+        .status-badge.error {
+            background: #ef4444;
+            color: white;
+        }
+
+        .status-badge.loading {
+            background: #0ea5e9;
+            color: white;
+        }
+
+        .footer {
+            padding: 20px 30px;
+            background: #f9fafb;
+            border-top: 1px solid #e5e7eb;
+            font-size: 12px;
+            color: #666;
+            text-align: center;
+        }
+
+        .api-status {
+            display: inline-block;
+            padding: 4px 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            margin: 0 4px;
+            font-family: monospace;
+        }
+
+        .api-status.online {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .api-status.offline {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        @media (max-width: 600px) {
+            .header {
+                padding: 30px 20px;
+            }
+
+            .header h1 {
+                font-size: 24px;
+            }
+
+            .content {
+                padding: 30px 20px;
+            }
+
+            .result-grid {
+                grid-template-columns: 1fr;
+            }
+
+            button {
+                padding: 10px 16px;
+                font-size: 13px;
+            }
+        }
+
+        .spinner-small {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid rgba(102, 126, 234, 0.3);
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-right: 4px;
+            vertical-align: middle;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📱 WhatsApp Ticket Uploader</h1>
+            <p>Extract support tickets from chat exports</p>
+        </div>
+
+        <div class="content">
+            <!-- Upload Area -->
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-area-icon">📁</div>
+                <p>Click to upload or drag and drop</p>
+                <p class="upload-area-hint">ZIP files up to 50 MB</p>
+                <input type="file" id="fileInput" accept=".zip" />
+            </div>
+
+            <!-- File Name Display -->
+            <div class="file-name" id="fileName">
+                <p><strong>Selected:</strong> <span id="fileNameText"></span></p>
+                <div class="progress-bar" id="progressBar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+            </div>
+
+            <!-- Buttons -->
+            <div class="button-group">
+                <button class="btn-upload" id="uploadBtn" disabled>Upload & Process</button>
+                <button class="btn-clear" id="clearBtn">Clear</button>
+            </div>
+
+            <!-- Results -->
+            <div class="results" id="results"></div>
+        </div>
+
+        <div class="footer">
+            API: <span class="api-status" id="apiStatus">Checking...</span>
+            <span id="apiStatusText">localhost:5001</span>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:5001/upload-whatsapp-zip';
+        const HEALTH_URL = 'http://localhost:5001/health';
+
+        let selectedFile = null;
+
+        // DOM Elements
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const fileNameDisplay = document.getElementById('fileName');
+        const fileNameText = document.getElementById('fileNameText');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const progressBar = document.getElementById('progressBar');
+        const progressFill = document.getElementById('progressFill');
+        const resultsDiv = document.getElementById('results');
+        const apiStatus = document.getElementById('apiStatus');
+        const apiStatusText = document.getElementById('apiStatusText');
+
+        // Check API health on load
+        checkApiHealth();
+        setInterval(checkApiHealth, 5000);
+
+        function checkApiHealth() {
+            fetch(HEALTH_URL, { mode: 'cors' })
+                .then(response => response.json())
+                .then(() => {
+                    apiStatus.textContent = '● Online';
+                    apiStatus.classList.remove('offline');
+                    apiStatus.classList.add('online');
+                    uploadBtn.disabled = !selectedFile;
+                })
+                .catch(() => {
+                    apiStatus.textContent = '● Offline';
+                    apiStatus.classList.remove('online');
+                    apiStatus.classList.add('offline');
+                    uploadBtn.disabled = true;
+                });
+        }
+
+        // Upload Area Click
+        uploadArea.addEventListener('click', () => fileInput.click());
+
+        // File Input Change
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                selectedFile = e.target.files[0];
+                showFileName();
+            }
+        });
+
+        // Drag and Drop
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                const file = e.dataTransfer.files[0];
+                if (file.name.endsWith('.zip')) {
+                    selectedFile = file;
+                    fileInput.files = e.dataTransfer.files;
+                    showFileName();
+                } else {
+                    showError('Please drop a ZIP file');
+                }
+            }
+        });
+
+        function showFileName() {
+            fileNameText.textContent = selectedFile.name;
+            fileNameDisplay.classList.add('show');
+            uploadBtn.disabled = false;
+        }
+
+        // Upload Button
+        uploadBtn.addEventListener('click', uploadFile);
+
+        // Clear Button
+        clearBtn.addEventListener('click', () => {
+            selectedFile = null;
+            fileInput.value = '';
+            fileNameDisplay.classList.remove('show');
+            resultsDiv.classList.remove('show');
+            resultsDiv.innerHTML = '';
+            uploadBtn.disabled = true;
+        });
+
+        async function uploadFile() {
+            if (!selectedFile) return;
+
+            uploadBtn.disabled = true;
+            progressBar.classList.add('show');
+            resultsDiv.innerHTML = '';
+            resultsDiv.classList.add('show');
+            showLoading('Processing your WhatsApp chat...');
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.status === 'success') {
+                    showSuccess(data);
+                } else {
+                    showError(data.error || 'Unknown error occurred');
+                }
+            } catch (error) {
+                showError('Failed to connect to API. Is it running? (python3 api_server.py)');
+                console.error(error);
+            } finally {
+                progressBar.classList.remove('show');
+                uploadBtn.disabled = false;
+            }
+        }
+
+        function showLoading(message) {
+            resultsDiv.innerHTML = `
+                <div class="result-card loading">
+                    <div class="result-title">
+                        <span class="spinner-small"></span>
+                        ${message}
+                    </div>
+                </div>
+            `;
+        }
+
+        function showSuccess(data) {
+            const timestamp = new Date(data.timestamp).toLocaleString();
+            resultsDiv.innerHTML = `
+                <div class="result-card success">
+                    <div class="result-title">
+                        ✓ Success
+                        <span class="status-badge success">Completed</span>
+                    </div>
+                    <div class="result-grid">
+                        <div class="result-item">
+                            <div class="result-label">Group Name</div>
+                            <div class="result-value" style="font-size: 14px; color: #16a34a;">${escapeHtml(data.group_name)}</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="result-label">Tickets Extracted</div>
+                            <div class="result-value">${data.tickets_extracted}</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="result-label">Tickets Inserted</div>
+                            <div class="result-value">${data.tickets_inserted}</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="result-label">Tickets Skipped</div>
+                            <div class="result-value">${data.tickets_skipped}</div>
+                        </div>
+                    </div>
+                    <div class="result-details">
+                        <div class="result-detail-row">
+                            <span class="result-detail-label">💰 LLM Cost:</span>
+                            <span class="result-detail-value">${data.cost.llm_cost}</span>
+                        </div>
+                        <div class="result-detail-row">
+                            <span class="result-detail-label">🎙️ Whisper Cost:</span>
+                            <span class="result-detail-value">${data.cost.whisper_cost}</span>
+                        </div>
+                        <div class="result-detail-row">
+                            <span class="result-detail-label">💵 Total Cost:</span>
+                            <span class="result-detail-value" style="font-weight: 700; color: #16a34a;">${data.cost.total_cost}</span>
+                        </div>
+                        <div class="result-detail-row">
+                            <span class="result-detail-label">⏰ Processed:</span>
+                            <span class="result-detail-value">${timestamp}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function showError(message) {
+            resultsDiv.innerHTML = `
+                <div class="result-card error">
+                    <div class="result-title">
+                        ✗ Error
+                        <span class="status-badge error">Failed</span>
+                    </div>
+                    <div class="result-details">
+                        <p>${escapeHtml(message)}</p>
+                    </div>
+                </div>
+            `;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
