@@ -21,6 +21,7 @@ import json
 import logging
 import tempfile
 import shutil
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_file
@@ -28,6 +29,8 @@ from flask_cors import CORS
 from datetime import datetime
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
+from requests.auth import HTTPBasicAuth
 
 load_dotenv()
 
@@ -124,6 +127,185 @@ def upload_whatsapp_zip():
             "status": "error",
             "error": str(e)
         }), 500
+
+
+def get_valid_customers(api_key, api_secret, frappe_base_url):
+    """Get list of valid customers from Frappe."""
+    try:
+        auth = HTTPBasicAuth(api_key, api_secret)
+        response = requests.get(
+            f"{frappe_base_url}/api/resource/Customer",
+            auth=auth,
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+            params={"limit_page_length": 100}
+        )
+
+        if response.status_code == 200:
+            customers = response.json().get("data", [])
+            customer_names = [c.get("name") for c in customers if c.get("name")]
+            log.info(f"✅ Found {len(customer_names)} valid customers")
+            return customer_names
+        else:
+            log.warning(f"⚠️ Could not fetch customers: {response.status_code}")
+            return []
+    except Exception as e:
+        log.warning(f"⚠️ Error fetching customers: {e}")
+        return []
+
+
+def send_to_frappe_listener(tickets, group_name, cost_info):
+    """Send extracted tickets to Frappe using REST API.
+
+    Uses official Frappe REST API endpoints:
+    POST /api/resource/Pulse Support Ticket
+
+    Authentication: Token-based (API Key + Secret)
+
+    Args:
+        tickets: List of extracted ticket dicts
+        group_name: WhatsApp group name
+        cost_info: Dict with llm_cost, whisper_cost, total_cost
+
+    Returns:
+        dict with status, created_count, failed_count, errors
+    """
+    frappe_url = os.environ.get("FRAPPE_LISTENER_URL")
+    if not frappe_url:
+        log.warning("⏭️ FRAPPE_LISTENER_URL not set - skipping Frappe sync")
+        return {"status": "skipped", "reason": "FRAPPE_LISTENER_URL not configured"}
+
+    # Get auth credentials
+    api_key = os.environ.get("FRAPPE_API_KEY")
+    api_secret = os.environ.get("FRAPPE_API_SECRET")
+    csrf_token = os.environ.get("FRAPPE_CSRF_TOKEN")
+
+    if not (api_key or csrf_token):
+        log.error("❌ No Frappe auth found: set FRAPPE_API_KEY/SECRET or FRAPPE_CSRF_TOKEN")
+        return {"status": "error", "error": "No Frappe authentication configured"}
+
+    # Get valid customers from Frappe
+    frappe_base_url = frappe_url.rsplit("/api/resource/", 1)[0]  # Extract base URL
+    valid_customers = get_valid_customers(api_key, api_secret, frappe_base_url)
+
+    if not valid_customers:
+        log.warning("⚠️ Could not validate customers - will attempt to create anyway")
+        default_customer = "ABC"  # Fallback
+    else:
+        default_customer = valid_customers[0]  # Use first customer as default
+
+    # Prepare headers (standard Frappe REST API headers)
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    auth = None
+
+    if api_key and api_secret:
+        # Token-based auth (recommended)
+        auth = HTTPBasicAuth(api_key, api_secret)
+        log.info(f"🔗 Frappe: Token-based auth")
+    elif csrf_token:
+        # CSRF-based auth (session-based)
+        headers["X-Frappe-CSRF-Token"] = csrf_token
+        log.info(f"🔗 Frappe: CSRF token auth")
+
+    created = []
+    failed = []
+
+    try:
+        log.info(f"📤 Sending {len(tickets)} tickets to Frappe: {frappe_url}")
+
+        # Process each ticket
+        for idx, ticket in enumerate(tickets):
+            try:
+                # Map WhatsApp fields to Frappe Pulse Support Ticket doctype
+                description = f"[WhatsApp: {group_name}]\n\n{ticket.get('content', '')}"
+
+                # Get customer - use valid one or default
+                customer = ticket.get("customer")
+                if customer not in valid_customers and valid_customers:
+                    # If customer not in list, use default
+                    customer = default_customer
+
+                payload = {
+                    "title": ticket.get("title", "Untitled Ticket"),
+                    "description": description,
+                    "status": "Open",
+                    "severity": ticket.get("priority", "Medium"),
+                    "module": ticket.get("module", "Selling"),
+                    "customer": customer,  # Validated customer from ERP
+                }
+
+                # Send to Frappe
+                response = requests.post(
+                    frappe_url,
+                    json=payload,
+                    headers=headers,
+                    auth=auth,
+                    timeout=15
+                )
+
+                if response.status_code == 201:
+                    # Success - document created
+                    doc = response.json().get("data", {})
+                    ticket_name = doc.get("name", "Unknown")
+                    created.append(ticket_name)
+                    log.info(f"  ✅ {idx+1}/{len(tickets)}: {ticket_name}")
+
+                elif response.status_code == 200:
+                    # Sometimes Frappe returns 200 instead of 201
+                    doc = response.json().get("data", {})
+                    ticket_name = doc.get("name", "Unknown")
+                    created.append(ticket_name)
+                    log.info(f"  ✅ {idx+1}/{len(tickets)}: {ticket_name}")
+
+                else:
+                    # Error
+                    error_data = response.json()
+                    error_msg = error_data.get("message", error_data.get("exc", str(response.status_code)))
+                    failed.append({
+                        "title": ticket.get("title"),
+                        "error": error_msg,
+                        "code": response.status_code
+                    })
+                    log.error(f"  ❌ {idx+1}/{len(tickets)}: {error_msg}")
+
+                # Rate limiting: 100ms between requests to avoid overwhelming server
+                import time
+                if idx < len(tickets) - 1:
+                    time.sleep(0.1)
+
+            except requests.Timeout:
+                failed.append({
+                    "title": ticket.get("title"),
+                    "error": "Request timeout (15s)"
+                })
+                log.error(f"  ⏱️ {idx+1}/{len(tickets)}: Timeout")
+
+            except Exception as e:
+                failed.append({
+                    "title": ticket.get("title"),
+                    "error": str(e)
+                })
+                log.error(f"  ❌ {idx+1}/{len(tickets)}: {e}")
+
+        # Summary
+        log.info(f"📊 Frappe sync complete: {len(created)}/{len(tickets)} successful")
+
+        return {
+            "status": "success" if len(created) > 0 else "partial",
+            "created_count": len(created),
+            "failed_count": len(failed),
+            "created_tickets": created,
+            "failed_tickets": failed,
+        }
+
+    except Exception as e:
+        log.error(f"❌ Frappe integration failed: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "error": str(e),
+            "created_count": len(created),
+            "failed_count": len(failed)
+        }
 
 
 def extract_text_agent(config, text_msgs, tracker):
@@ -255,15 +437,29 @@ def process_uploaded_zip(zip_path):
         else:
             inserted, skipped = 0, 0
 
+        cost_info = {
+            "llm_cost": f"${tracker.total_llm_cost():.4f}",
+            "whisper_cost": f"${tracker.whisper_cost():.4f}",
+            "total_cost": f"${tracker.total_cost():.4f}",
+        }
+
+        # Send to Frappe listener for final processing (after DB insertion)
+        frappe_result = {"status": "skipped"}
+        if inserted > 0:
+            log.info(f"📤 Syncing {inserted} tickets to Frappe...")
+            frappe_result = send_to_frappe_listener(all_tickets, group_name, cost_info)
+
         return {
             "group_name": group_name,
             "tickets_extracted": len(all_tickets),
             "tickets_inserted": inserted,
             "tickets_skipped": skipped,
-            "cost": {
-                "llm_cost": f"${tracker.total_llm_cost():.4f}",
-                "whisper_cost": f"${tracker.whisper_cost():.4f}",
-                "total_cost": f"${tracker.total_cost():.4f}",
+            "cost": cost_info,
+            "frappe": {
+                "status": frappe_result.get("status"),
+                "created": frappe_result.get("created_count", 0),
+                "failed": frappe_result.get("failed_count", 0),
+                "details": frappe_result.get("failed_tickets", []) if frappe_result.get("failed_tickets") else None
             },
             "timestamp": datetime.now().isoformat(),
         }

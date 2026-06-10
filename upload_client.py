@@ -2,11 +2,16 @@
 """Python client for uploading WhatsApp chat exports to the microservice."""
 
 import sys
+import os
 import requests
 import json
 from pathlib import Path
+from dotenv import load_dotenv
 
-API_URL = "http://localhost:5001/upload-whatsapp-zip"
+load_dotenv()
+
+# Get API URL from environment, fallback to localhost for local dev
+API_URL = os.environ.get("API_URL", "http://localhost:5001/upload-whatsapp-zip")
 
 
 def upload_zip(file_path, api_url=API_URL):

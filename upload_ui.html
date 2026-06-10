@@ -422,13 +422,15 @@
 
         <div class="footer">
             API: <span class="api-status" id="apiStatus">Checking...</span>
-            <span id="apiStatusText">localhost:5001</span>
+            <span id="apiStatusText"></span>
         </div>
     </div>
 
     <script>
-        const API_URL = 'http://localhost:5001/upload-whatsapp-zip';
-        const HEALTH_URL = 'http://localhost:5001/health';
+        // Build API URLs dynamically from current domain (works in both dev and production)
+        const API_BASE = `${window.location.protocol}//${window.location.host}`;
+        const API_URL = `${API_BASE}/upload-whatsapp-zip`;
+        const HEALTH_URL = `${API_BASE}/health`;
 
         let selectedFile = null;
 
@@ -450,6 +452,7 @@
         setInterval(checkApiHealth, 5000);
 
         function checkApiHealth() {
+            apiStatusText.textContent = API_BASE;
             fetch(HEALTH_URL, { mode: 'cors' })
                 .then(response => response.json())
                 .then(() => {
@@ -609,6 +612,18 @@
                             <span class="result-detail-label">⏰ Processed:</span>
                             <span class="result-detail-value">${timestamp}</span>
                         </div>
+                        ${data.frappe && data.frappe.status !== 'skipped' ? `
+                        <div class="result-detail-row">
+                            <span class="result-detail-label">📤 Frappe Sync:</span>
+                            <span class="result-detail-value">${data.frappe.created}/${data.frappe.created + data.frappe.failed} synced</span>
+                        </div>
+                        ${data.frappe.failed > 0 ? `
+                        <div class="result-detail-row" style="color: #dc2626;">
+                            <span class="result-detail-label">⚠️ Frappe Errors:</span>
+                            <span class="result-detail-value">${data.frappe.failed} failed</span>
+                        </div>
+                        ` : ''}
+                        ` : ''}
                     </div>
                 </div>
             `;
