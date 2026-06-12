@@ -149,7 +149,121 @@ def store_raw_messages(group_name, group_id, messages, media_refs):
         raise
 
 
-def insert_tickets_to_db(group_name, tickets):
+# ── ROSTER MATCHING FUNCTIONS ────────────────────────────────────────────────
+
+def load_roster(filepath="client_roster.csv"):
+    """Load branch manager roster from CSV file.
+
+    Returns a list of dicts with keys: branch, manager_name, contact_no, city
+    If file doesn't exist, prints warning and returns empty list.
+    """
+    import csv
+    if not os.path.exists(filepath):
+        log.warning(f"⚠️  Roster file not found: {filepath}. Continuing without roster matching.")
+        return []
+
+    try:
+        roster = []
+        with open(filepath, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                roster.append(row)
+        log.info(f"✅ Loaded roster: {len(roster)} branches")
+        return roster
+    except Exception as e:
+        log.error(f"❌ Failed to load roster: {e}")
+        return []
+
+
+def normalize_phone(raw):
+    """Normalize phone number to comparable core digits.
+
+    - Remove spaces, dashes, plus, parentheses
+    - Remove leading 92 (Pakistan country code)
+    - Remove leading 0
+    - Return remaining digits
+
+    Examples (all normalize to same): 0370-1950510, +92 370 1950510, +923701950510
+    """
+    if not raw:
+        return ""
+
+    # Remove spaces, dashes, plus, parentheses
+    normalized = re.sub(r'[\s\-+()]+', '', str(raw))
+
+    # Remove leading 92 (Pakistan country code)
+    if normalized.startswith('92'):
+        normalized = normalized[2:]
+
+    # Remove leading 0
+    if normalized.startswith('0'):
+        normalized = normalized[1:]
+
+    return normalized
+
+
+def match_sender_to_roster(sender, roster):
+    """Match message sender (phone or name) to roster entry.
+
+    Returns:
+    - matched roster dict if unambiguous phone or name match
+    - dict with "ambiguous": True and entry data if name matches multiple branches
+    - None if no match
+
+    Matching logic:
+    1. Try PHONE match first (primary, reliable, unique) — normalize both, compare
+    2. Try NAME match ONLY if:
+       - Sender contains NO digits (pure name, not phone)
+       - Manager name appears as whole word (word-boundary regex match)
+    3. Handle duplicates:
+       - If name matches multiple branches, return ambiguous marker
+       - Do NOT guess which branch
+    """
+    if not sender or not roster:
+        return None
+
+    sender_str = str(sender).strip()
+    sender_normalized_phone = normalize_phone(sender_str)
+
+    # 1. PHONE MATCH (primary, keep exactly as is)
+    if sender_normalized_phone:
+        for entry in roster:
+            roster_phone = normalize_phone(entry.get("contact_no", ""))
+            if sender_normalized_phone == roster_phone:
+                return entry
+
+    # 2. NAME MATCH (strict, word-boundary only)
+    # Only try name match if sender has NO digits (pure name, not phone-like)
+    if not re.search(r'\d', sender_str):
+        name_matches = []
+
+        for entry in roster:
+            manager_name = entry.get("manager_name", "").strip()
+
+            # Use word-boundary regex: manager name must match as whole word
+            # \b ensures "Ali" doesn't match "Khalil" or "Alison"
+            # Case-insensitive matching
+            pattern = r'\b' + re.escape(manager_name) + r'\b'
+            if re.search(pattern, sender_str, re.IGNORECASE):
+                name_matches.append(entry)
+
+        # If exactly one match, return it
+        if len(name_matches) == 1:
+            return name_matches[0]
+
+        # If multiple matches (ambiguous), return special marker
+        if len(name_matches) > 1:
+            return {
+                "ambiguous": True,
+                "sender": sender_str,
+                "matches": name_matches,  # For logging/review
+                "manager_name": name_matches[0].get("manager_name", "")
+            }
+
+    return None
+
+
+def insert_tickets_to_db(group_name, tickets, roster=None):
     """Insert extracted tickets into tabPulse Support Ticket table.
 
     Returns:
@@ -173,8 +287,52 @@ def insert_tickets_to_db(group_name, tickets):
 
         inserted = 0
         skipped = 0
+        client_tickets_phone = 0
+        client_tickets_name = 0
+        ambiguous_matches = []
+        team_tickets = 0
+        unmatched_senders = []
 
         for ticket in tickets:
+            # ROSTER MATCHING: Match sender to branch manager
+            sender = ticket.get("sender", "Unknown")
+            matched_entry = match_sender_to_roster(sender, roster) if roster else None
+
+            if matched_entry:
+                # Check if this is an ambiguous match (multiple branches share manager name)
+                if matched_entry.get("ambiguous"):
+                    raised_by = "client"
+                    matched_branch = "Ambiguous - needs review"
+                    matched_manager = matched_entry.get("manager_name", "")
+                    matched_city = ""
+                    ambiguous_matches.append(sender)
+                else:
+                    # Unambiguous match (phone or unique name)
+                    raised_by = "client"
+                    matched_branch = matched_entry.get("branch", "Unknown")
+                    matched_manager = matched_entry.get("manager_name", "")
+                    matched_city = matched_entry.get("city", "")
+
+                    # Track match type (phone vs name)
+                    # If it has digits after normalization, it was a phone match
+                    if normalize_phone(sender):
+                        client_tickets_phone += 1
+                    else:
+                        client_tickets_name += 1
+            else:
+                raised_by = "team"
+                matched_branch = "Unknown"
+                matched_manager = ""
+                matched_city = ""
+                team_tickets += 1
+                unmatched_senders.append(sender)
+
+            # Add roster data to ticket for ai_analysis
+            ticket["raised_by"] = raised_by
+            ticket["matched_branch"] = matched_branch
+            ticket["matched_manager"] = matched_manager
+            ticket["matched_city"] = matched_city
+
             # Generate SUP-XXXX name with sequential numbering
             name = f"SUP-{next_num:04d}"
             next_num += 1
@@ -190,33 +348,64 @@ def insert_tickets_to_db(group_name, tickets):
                 parts.append(f"Voice transcript: {ticket['voice_transcript']}")
             if ticket.get("image_context"):
                 parts.append(f"Image context: {ticket['image_context']}")
-            description = "\n\n".join(parts)
+            actual_description = "\n\n".join(parts)
+
+            # Get the full normalised title and create a concise version
+            full_title = str(ticket.get("normalised", ""))
+
+            # Extract concise title: find the core issue (after branch/date info)
+            # Pattern: look for "is missing", "lacks", "no", "missing" and extract from there
+            import re as regex_module
+            concise_title = full_title
+
+            # Try to extract just the issue part (remove branch name, dates, etc at the start)
+            # Look for common issue markers
+            issue_match = regex_module.search(r'((?:is |has |with |showing |printed |dated |branch )*)?(.*?(?:missing|lacks|no |without|needs|requires|issue|problem|error|fail).*?)(?:\(|$)', full_title, regex_module.IGNORECASE)
+            if issue_match:
+                concise_title = issue_match.group(2).strip()
+            else:
+                # Fallback: take last sentence or last part after commas
+                sentences = full_title.split('.')
+                concise_title = sentences[-1].strip() if sentences else full_title
+
+                # Remove common prefixes (branch names, dates, locations)
+                concise_title = regex_module.sub(r'^.*?(branch|receipt|dated|said|shows?|shows?|printed|showing)\s+', '', concise_title, flags=regex_module.IGNORECASE).strip()
+
+            concise_title = concise_title[:140]  # Ensure it fits in title field
+
+            # Build final description: full title + two blank lines + actual description
+            description = f"{full_title}\n\n{actual_description}"
 
             insert_query = """
                 INSERT IGNORE INTO `tabPulse Support Ticket`
                 (name, title, customer, project, module, category, severity, status,
-                 description, screenshots, ai_analysis, creation, created_at, docstatus, idx)
+                 description, screenshots, ai_analysis, creation, created_at, docstatus, idx, _user_tags)
                 VALUES
                 (%(name)s, %(title)s, %(customer)s, %(project)s, %(module)s, %(category)s,
                  %(severity)s, %(status)s, %(description)s, %(screenshots)s,
-                 %(ai_analysis)s, NOW(), %(created_at)s, %(docstatus)s, %(idx)s)
+                 %(ai_analysis)s, NOW(), %(created_at)s, %(docstatus)s, %(idx)s, %(user_tags)s)
             """
+
+            # Use matched_branch as customer/project if client, else use group_name
+            customer = matched_branch if raised_by == "client" else group_name
+            project = matched_branch if raised_by == "client" else group_name
 
             data = {
                 "name": name,
-                "title": str(ticket.get("normalised", ""))[:140],
-                "customer": str(group_name)[:140],
-                "project": str(group_name)[:140],
+                "title": concise_title,  # Use concise version for title
+                "customer": str(customer)[:140],
+                "project": str(project)[:140],
                 "module": module,
                 "category": str(ticket.get("category", "Uncategorized"))[:140],
                 "severity": "High" if ticket.get("needs_review") else "Medium",
                 "status": "Open",
-                "description": description,
+                "description": description,  # Contains: full_title + blank lines + actual description
                 "screenshots": json.dumps(ticket.get("media_files", [])) if ticket.get("media_files") else None,
                 "ai_analysis": json.dumps(ticket, ensure_ascii=False, default=str),
                 "created_at": parse_timestamp(ticket.get("timestamp", "")),
                 "docstatus": 0,
                 "idx": 0,
+                "user_tags": raised_by,
             }
 
             cursor.execute(insert_query, data)
@@ -227,6 +416,29 @@ def insert_tickets_to_db(group_name, tickets):
 
         conn.commit()
         log.info(f"  DB insert: {inserted} inserted, {skipped} skipped (duplicates)")
+
+        # SUMMARY REPORT
+        log.info("")
+        log.info("📊 Tickets by source:")
+        log.info(f"   Client tickets (matched by phone):  {client_tickets_phone}")
+        log.info(f"   Client tickets (matched by name):   {client_tickets_name}")
+        if ambiguous_matches:
+            log.info(f"   Ambiguous matches (needs review):   {len(ambiguous_matches)}")
+        log.info(f"   Team tickets (unmatched):           {team_tickets}")
+
+        if ambiguous_matches:
+            log.info("")
+            log.info("⚠️  Ambiguous matches (multiple branches share this manager name):")
+            for sender in ambiguous_matches:
+                log.info(f"   - {sender}")
+
+        if unmatched_senders:
+            log.info("")
+            log.info("⚠️  Unmatched senders flagged as team:")
+            for sender in unmatched_senders:
+                log.info(f"   - {sender}")
+        log.info("")
+
         conn.close()
         return inserted, skipped
 
@@ -1150,8 +1362,9 @@ def process_zip(zip_path, config):
             log.info("  No tickets found — skipping database insert")
             return
 
-        # 5. Insert tickets to database
-        inserted, skipped = insert_tickets_to_db(group_name, all_tickets)
+        # 5. Load roster and insert tickets to database
+        roster = load_roster()
+        inserted, skipped = insert_tickets_to_db(group_name, all_tickets, roster=roster)
         mark_raw_processed(group_name)
 
         # Print cost report
@@ -1241,8 +1454,9 @@ def process_from_webhook(group_id, config):
             mark_as_processed(group_id)
             return
 
-        # 4. Insert tickets to database
-        inserted, skipped = insert_tickets_to_db(group_name, all_tickets)
+        # 4. Load roster and insert tickets to database
+        roster = load_roster()
+        inserted, skipped = insert_tickets_to_db(group_name, all_tickets, roster=roster)
 
         # Print cost report
         tracker.report(

@@ -22,6 +22,7 @@ import logging
 import tempfile
 import shutil
 import time
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_file
@@ -38,8 +39,7 @@ load_dotenv()
 from scheduler import (
     load_config, parse_chat, group_voice_with_images,
     extract_text_tickets, extract_grouped_context_tickets,
-    extract_image_only_tickets, insert_tickets_to_db,
-    mark_raw_processed, store_raw_messages, create_message_thread_group, RunCostTracker
+    extract_image_only_tickets, RunCostTracker
 )
 import anthropic
 import zipfile
@@ -68,14 +68,23 @@ def upload_whatsapp_zip():
     """
     Upload a WhatsApp chat export ZIP file for processing.
 
+    
+    Process:
+    1. Extract tickets from WhatsApp chat (text, voice, images)
+    2. Send ALL extracted tickets to Frappe API
+    3. Frappe handles database storage
+
     Returns:
         {
             "status": "success" | "error",
             "group_name": str,
             "tickets_extracted": int,
-            "tickets_inserted": int,
-            "tickets_skipped": int,
             "cost": {...},
+            "frappe": {
+                "status": "success" | "error",
+                "created": int,
+                "failed": int
+            },
             "timestamp": str,
             "error": str (if status=error)
         }
@@ -104,14 +113,18 @@ def upload_whatsapp_zip():
             }), 400
 
         # Save uploaded file
+        # Use subdirectory instead of timestamp prefix to preserve original filename for group name extraction
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        temp_file = UPLOAD_DIR / f"{timestamp}_{file.filename}"
+        upload_subdir = UPLOAD_DIR / timestamp
+        upload_subdir.mkdir(exist_ok=True)
+        temp_file = upload_subdir / file.filename
         file.save(str(temp_file))
 
         log.info(f"Received file: {file.filename} ({file.content_length} bytes)")
 
         # Process the ZIP file
         result = process_uploaded_zip(temp_file)
+        log.info(f"Processing result: {result['tickets_extracted']} tickets extracted, Frappe status: {result['frappe']['status']}")
 
         # Clean up
         temp_file.unlink(missing_ok=True)
@@ -127,31 +140,6 @@ def upload_whatsapp_zip():
             "status": "error",
             "error": str(e)
         }), 500
-
-
-def get_valid_customers(api_key, api_secret, frappe_base_url):
-    """Get list of valid customers from Frappe."""
-    try:
-        auth = HTTPBasicAuth(api_key, api_secret)
-        response = requests.get(
-            f"{frappe_base_url}/api/resource/Customer",
-            auth=auth,
-            headers={"Content-Type": "application/json"},
-            timeout=10,
-            params={"limit_page_length": 100}
-        )
-
-        if response.status_code == 200:
-            customers = response.json().get("data", [])
-            customer_names = [c.get("name") for c in customers if c.get("name")]
-            log.info(f"✅ Found {len(customer_names)} valid customers")
-            return customer_names
-        else:
-            log.warning(f"⚠️ Could not fetch customers: {response.status_code}")
-            return []
-    except Exception as e:
-        log.warning(f"⚠️ Error fetching customers: {e}")
-        return []
 
 
 def send_to_frappe_listener(tickets, group_name, cost_info):
@@ -184,15 +172,63 @@ def send_to_frappe_listener(tickets, group_name, cost_info):
         log.error("❌ No Frappe auth found: set FRAPPE_API_KEY/SECRET or FRAPPE_CSRF_TOKEN")
         return {"status": "error", "error": "No Frappe authentication configured"}
 
-    # Get valid customers from Frappe
-    frappe_base_url = frappe_url.rsplit("/api/resource/", 1)[0]  # Extract base URL
-    valid_customers = get_valid_customers(api_key, api_secret, frappe_base_url)
+    # Get valid customers and WhatsApp group mappings from Frappe
+    frappe_base_url = frappe_url.rsplit("/api/resource/", 1)[0]
+    auth_temp = HTTPBasicAuth(api_key, api_secret) if api_key else None
 
-    if not valid_customers:
-        log.warning("⚠️ Could not validate customers - will attempt to create anyway")
-        default_customer = "ABC"  # Fallback
-    else:
-        default_customer = valid_customers[0]  # Use first customer as default
+    valid_customers = []
+    whatsapp_group_mapping = {}  # Maps whatsapp_group → erp_customer
+    default_customer = "ABC"
+
+    try:
+        # Fetch all customers
+        response = requests.get(
+            f"{frappe_base_url}/api/resource/Customer",
+            auth=auth_temp,
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+            params={"limit_page_length": 100}
+        )
+        if response.status_code == 200:
+            customers = response.json().get("data", [])
+            valid_customers = [c.get("name") for c in customers if c.get("name")]
+            default_customer = valid_customers[0] if valid_customers else "ABC"
+            log.info(f"✅ Found {len(valid_customers)} customers in Frappe")
+        else:
+            log.warning(f"⚠️ Could not fetch customers (status {response.status_code}), using ABC")
+
+        # Fetch WhatsApp Customer Group mapping (it's a Single doctype, not a list)
+        log.info(f"📡 Fetching WhatsApp Customer Group mapping...")
+        response = requests.get(
+            f"{frappe_base_url}/api/resource/Whatsapp Customer Group/Whatsapp Customer Group",
+            auth=auth_temp,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        log.info(f"📡 Response status: {response.status_code}")
+        if response.status_code == 200:
+            resp_json = response.json()
+            doc = resp_json.get("data", {})
+            # Extract the child table
+            mappings = doc.get("whatsapp_group_mapping", [])
+            log.info(f"📡 Found {len(mappings)} mappings in Whatsapp Customer Group")
+            for mapping in mappings:
+                whatsapp_group = mapping.get("whatsapp_group", "").strip()
+                erp_customer = mapping.get("erp_customer", "").strip()
+                if whatsapp_group and erp_customer:
+                    whatsapp_group_mapping[whatsapp_group] = erp_customer
+                    log.debug(f"    ✓ Mapping: '{whatsapp_group}' → '{erp_customer}'")
+            log.info(f"✅ Loaded {len(whatsapp_group_mapping)} WhatsApp group mappings")
+            if whatsapp_group_mapping:
+                log.info(f"   Available: {list(whatsapp_group_mapping.keys())}")
+        else:
+            log.warning(f"⚠️ Could not fetch WhatsApp group mappings (status {response.status_code})")
+            try:
+                log.warning(f"   Response: {response.text[:300]}")
+            except:
+                pass
+    except Exception as e:
+        log.warning(f"⚠️ Error fetching mappings: {e}, will use fallback")
 
     # Prepare headers (standard Frappe REST API headers)
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -210,29 +246,100 @@ def send_to_frappe_listener(tickets, group_name, cost_info):
     created = []
     failed = []
 
+    # Module rotation (same as MariaDB)
+    modules = ["POS", "Stock", "POS", "Payroll", "Selling", "Stock", "Manufacturing"]
+    ticket_counter = 1
+
     try:
         log.info(f"📤 Sending {len(tickets)} tickets to Frappe: {frappe_url}")
 
-        # Process each ticket
+        # Process each ticket using EXACT same schema as MariaDB
         for idx, ticket in enumerate(tickets):
             try:
-                # Map WhatsApp fields to Frappe Pulse Support Ticket doctype
-                description = f"[WhatsApp: {group_name}]\n\n{ticket.get('content', '')}"
+                # Use EXACT same field mapping as insert_tickets_to_db()
+                ticket_counter += 1
+                module = modules[(ticket_counter - 1) % len(modules)]
 
-                # Get customer - use valid one or default
-                customer = ticket.get("customer")
-                if customer not in valid_customers and valid_customers:
-                    # If customer not in list, use default
-                    customer = default_customer
+                # Build description from raw_message, voice_transcript, image_context
+                parts = []
+                if ticket.get("raw_message"):
+                    parts.append(f"Message: {ticket['raw_message']}")
+                if ticket.get("voice_transcript"):
+                    parts.append(f"Voice transcript: {ticket['voice_transcript']}")
+                if ticket.get("image_context"):
+                    parts.append(f"Image context: {ticket['image_context']}")
+
+                # Fallback to content if no structured fields
+                if not parts and ticket.get("content"):
+                    parts.append(f"Message: {ticket['content']}")
+
+                actual_description = "\n\n".join(parts) if parts else ticket.get("content", "")
+
+                # Extract full title and create concise version
+                full_title = str(ticket.get("normalised", ticket.get("title", "Untitled")))
+
+                # Create concise title by extracting core issue
+                # Look for key phrases like "missing", "lacks", "no", etc.
+                concise_title = full_title
+                issue_match = re.search(
+                    r'((?:is |has |with |showing |printed |dated |branch )*)?(.*?(?:missing|lacks|no |without|needs|requires|issue|problem|error|fail).*?)(?:\(|$)',
+                    full_title,
+                    re.IGNORECASE
+                )
+                if issue_match:
+                    concise_title = issue_match.group(2).strip()
+                else:
+                    # Fallback: remove common prefixes
+                    concise_title = re.sub(
+                        r'^.*?(branch|receipt|dated|said|shows?|printed|showing)\s+',
+                        '',
+                        full_title,
+                        flags=re.IGNORECASE
+                    ).strip()
+
+                concise_title = concise_title[:140]  # Ensure it fits
+
+                # Build description: full title + two blank lines + actual description
+                description = f"{full_title}\n\n{actual_description}"
+
+                # Map WhatsApp group to ERP customer using the mapping
+                # First try WhatsApp group mapping, then valid customers, then fallback to ABC
+                log.debug(f"Looking up customer for group_name: '{group_name}'")
+                log.debug(f"  Available mappings: {list(whatsapp_group_mapping.keys())}")
+                log.debug(f"  Available customers: {valid_customers[:5]}... ({len(valid_customers)} total)")
+
+                if group_name in whatsapp_group_mapping:
+                    customer_to_use = whatsapp_group_mapping[group_name]
+                    log.info(f"  ✓ Using mapped customer: {customer_to_use} for group: {group_name}")
+                elif group_name in valid_customers:
+                    customer_to_use = group_name
+                    log.info(f"  ✓ Using group_name as customer (found in valid customers)")
+                else:
+                    customer_to_use = default_customer
+                    log.info(f"  ⚠️ Using fallback customer: {default_customer} (group '{group_name}' not found)")
+
+                # Map category to valid Frappe values
+                valid_categories = ["Bug", "Question", "Request", "Training", "Escalation"]
+                extracted_category = str(ticket.get("category", "Request"))
+                category_to_use = extracted_category if extracted_category in valid_categories else "Request"
 
                 payload = {
-                    "title": ticket.get("title", "Untitled Ticket"),
-                    "description": description,
+                    "title": concise_title,  # Use concise version
+                    "customer": str(customer_to_use)[:140],
+                    "module": module,
+                    "category": category_to_use,
+                    "severity": "High" if ticket.get("needs_review") else "Medium",
                     "status": "Open",
-                    "severity": ticket.get("priority", "Medium"),
-                    "module": ticket.get("module", "Selling"),
-                    "customer": customer,  # Validated customer from ERP
+                    "description": description,  # Contains: full_title + blank lines + actual description
+                    "ai_analysis": json.dumps(ticket, ensure_ascii=False, default=str),
                 }
+
+                # Only add project if group_name exists as a valid project
+                if group_name in valid_customers:  # Use same validation as customer
+                    payload["project"] = str(group_name)[:140]
+
+                # Log the payload being sent
+                log.info(f"📋 Payload {idx+1}/10: {json.dumps(payload, indent=2, ensure_ascii=False)}")
 
                 # Send to Frappe
                 response = requests.post(
@@ -389,19 +496,31 @@ def process_uploaded_zip(zip_path):
 
         # Parse chat
         raw_name, timeline = parse_chat(chat_txt)
-        group_name = raw_name or zip_path.stem
+        # Fallback to ZIP filename if parsing failed, then clean it up
+        fallback_name = zip_path.stem
+        log.debug(f"ZIP stem (before cleaning): '{fallback_name}'")
+
+        # Remove "WhatsApp Chat - " or "WhatsApp Chat with " if present
+        fallback_name = fallback_name.replace("WhatsApp Chat - ", "").replace("WhatsApp Chat with ", "")
+        log.debug(f"After removing prefix: '{fallback_name}'")
+
+        # Remove upload timestamp from beginning (YYYYMMDD_HHMM_)
+        fallback_name = re.sub(r'^\d{8}_\d{4,6}_', '', fallback_name)
+        log.debug(f"After removing start timestamp: '{fallback_name}'")
+
+        # Remove trailing backup timestamps (_YYYYMMDD_HHMM or similar)
+        fallback_name = re.sub(r'_\d{8}_\d{4,6}.*', '', fallback_name).strip()
+        log.debug(f"After removing trailing timestamps: '{fallback_name}'")
+
+        group_name = raw_name or fallback_name
+        log.info(f"📋 Group: '{group_name}' (raw_name='{raw_name or 'None'}', fallback='{fallback_name}')")
 
         if not timeline:
             raise ValueError("No messages found in chat file")
 
         log.info(f"Processing: {group_name} ({len(timeline)} messages)")
 
-        # Store messages and create thread group
-        media_refs = {e.get("idx"): e.get("filename") for e in timeline if e.get("filename")}
-        store_raw_messages(group_name, group_name, timeline, media_refs)
-        create_message_thread_group(group_name, group_name, timeline)
-
-        # Extract tickets using parallel sub-agents
+        # Extract tickets using parallel sub-agents (NO MariaDB - send directly to Frappe)
         log.info("🚀 Starting parallel extraction agents")
         text_msgs = [e for e in timeline if e["type"] == "text"]
 
@@ -430,30 +549,21 @@ def process_uploaded_zip(zip_path):
 
         log.info(f"✅ Extracted {len(all_tickets)} ticket(s) from {len(results)} agents")
 
-        # Insert to database
-        if all_tickets:
-            inserted, skipped = insert_tickets_to_db(group_name, all_tickets)
-            mark_raw_processed(group_name)
-        else:
-            inserted, skipped = 0, 0
-
         cost_info = {
             "llm_cost": f"${tracker.total_llm_cost():.4f}",
             "whisper_cost": f"${tracker.whisper_cost():.4f}",
             "total_cost": f"${tracker.total_cost():.4f}",
         }
 
-        # Send to Frappe listener for final processing (after DB insertion)
+        # Send directly to Frappe API (bypass MariaDB)
         frappe_result = {"status": "skipped"}
-        if inserted > 0:
-            log.info(f"📤 Syncing {inserted} tickets to Frappe...")
+        if all_tickets:
+            log.info(f"📤 Sending {len(all_tickets)} tickets directly to Frappe API...")
             frappe_result = send_to_frappe_listener(all_tickets, group_name, cost_info)
 
         return {
             "group_name": group_name,
             "tickets_extracted": len(all_tickets),
-            "tickets_inserted": inserted,
-            "tickets_skipped": skipped,
             "cost": cost_info,
             "frappe": {
                 "status": frappe_result.get("status"),

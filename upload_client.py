@@ -41,8 +41,18 @@ def upload_zip(file_path, api_url=API_URL):
             print("✅ SUCCESS!\n")
             print(f"Group:            {result['group_name']}")
             print(f"Tickets extracted: {result['tickets_extracted']}")
-            print(f"Tickets inserted:  {result['tickets_inserted']}")
-            print(f"Tickets skipped:   {result['tickets_skipped']}")
+
+            # Frappe sync results
+            frappe_status = result.get('frappe', {})
+            created = frappe_status.get('created', 0)
+            failed = frappe_status.get('failed', 0)
+            if created > 0 or failed > 0:
+                print(f"\n📤 Frappe Sync:")
+                print(f"   Created:  {created}")
+                print(f"   Failed:   {failed}")
+                if frappe_status.get('details'):
+                    print(f"   Errors:   {frappe_status['details']}")
+
             print(f"\n💰 Cost:")
             print(f"   LLM:     {result['cost']['llm_cost']}")
             print(f"   Whisper: {result['cost']['whisper_cost']}")
